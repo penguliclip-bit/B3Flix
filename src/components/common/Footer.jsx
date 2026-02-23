@@ -21,9 +21,10 @@ const Footer = () => {
             lineHeight: "1.6",
           }}
         >
-          Semua konten di website ini tidak disimpan di server kami. Kami hanya
-          menampilkan data dari API pihak ketiga. Kami tidak bertanggung jawab
-          atas konten yang ditampilkan.
+          Semua konten di website ini bajakan dan tidak resmi. Kami tidak
+          memiliki afiliasi dengan studio atau pembuat film manapun. Situs ini
+          hanya untuk hiburan dan edukasi. Jika Anda menyukai filmnya, dukunglah
+          dengan menonton di platform resmi!
         </p>
         <p style={{ marginBottom: "10px" }}>
           <Link
