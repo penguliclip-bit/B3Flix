@@ -11,172 +11,114 @@ const Navbar = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [showDropdown, setShowDropdown] = useState(false);
-
-  const debouncedSearchTerm = useDebounce(searchQuery, 500);
+  const debouncedTerm = useDebounce(searchQuery, 400);
   const navigate = useNavigate();
   const searchRef = useRef(null);
 
   useEffect(() => {
-    const fetchResults = async () => {
-      if (debouncedSearchTerm) {
-        try {
-          const res = await api.search(debouncedSearchTerm);
-          setSearchResults(res.items || []);
-          setShowDropdown(true);
-        } catch (error) {
-          console.error("Search error", error);
-        }
-      } else {
-        setSearchResults([]);
-        setShowDropdown(false);
-      }
-    };
+    if (!debouncedTerm) { setSearchResults([]); setShowDropdown(false); return; }
+    api.search(debouncedTerm, 1).then(res => {
+      setSearchResults(res.items || []);
+      setShowDropdown(true);
+    }).catch(() => {});
+  }, [debouncedTerm]);
 
-    fetchResults();
-  }, [debouncedSearchTerm]);
-
-  // Click outside to close dropdown
   useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (searchRef.current && !searchRef.current.contains(event.target)) {
-        setShowDropdown(false);
-      }
+    const handler = (e) => {
+      if (searchRef.current && !searchRef.current.contains(e.target)) setShowDropdown(false);
     };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const handleSearchSubmit = (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
     if (searchQuery.trim()) {
       navigate(`/search?q=${encodeURIComponent(searchQuery)}`);
-      setIsSearchOpen(false);
-      setShowDropdown(false);
-      setSearchQuery("");
+      setIsSearchOpen(false); setShowDropdown(false); setSearchQuery("");
     }
   };
 
-  const toggleSearch = () => {
-    setIsSearchOpen(!isSearchOpen);
-    if (!isSearchOpen)
-      setTimeout(() => document.querySelector(".searchInput")?.focus(), 100);
-  };
+  const NAV_LINKS = [
+    { label: 'Home', to: '/' },
+    { label: 'Movies', to: '/category/popular-movies' },
+    { label: 'TV Shows', to: '/category/popular-tv' },
+    { label: 'K-Drama', to: '/category/kdrama' },
+    { label: 'Anime', to: '/category/anime' },
+    { label: 'Indo', to: '/category/indonesian-movies' },
+    { label: 'Categories', to: '/categories' },
+  ];
 
   return (
     <nav className="navbar">
       <Link to="/" className="logo">
-        <img src="/logo.png" alt="B3Flix" className="navbar-logo-img" />
+        <img src="/logo.png" alt="B3Flix" className="navbar-logo-img" onError={e => e.target.style.display='none'} />
         <span>B3Flix</span>
       </Link>
 
       <div className={`navLinks ${isMobileMenuOpen ? "open" : ""}`}>
-        <Link to="/" className="navLink">
-          Home
-        </Link>
-        <Link to="/categories" className="navLink">
-          All Categories
-        </Link>
-        <Link to="/category/kdrama" className="navLink">
-          K-Drama
-        </Link>
-        <Link to="/category/short-tv" className="navLink">
-          Short TV
-        </Link>
-        <Link to="/category/anime" className="navLink">
-          Anime
-        </Link>
-        <Link to="/category/western-tv" className="navLink">
-          Western TV
-        </Link>
-        <Link to="/category/indo-dub" className="navLink">
-          Indo Dub
-        </Link>
+        {NAV_LINKS.map(link => (
+          <Link key={link.to} to={link.to} className="navLink" onClick={() => setIsMobileMenuOpen(false)}>
+            {link.label}
+          </Link>
+        ))}
       </div>
 
       <div className="rightSection">
         <div ref={searchRef} style={{ position: "relative" }}>
-          <form
-            className={`searchContainer ${isSearchOpen ? "active" : ""}`}
-            onSubmit={handleSearchSubmit}
-          >
-            <button type="button" className="iconButton" onClick={toggleSearch}>
+          <form className={`searchContainer ${isSearchOpen ? "active" : ""}`} onSubmit={handleSubmit}>
+            <button type="button" className="iconButton" onClick={() => {
+              setIsSearchOpen(!isSearchOpen);
+              if (!isSearchOpen) setTimeout(() => document.querySelector(".searchInput")?.focus(), 100);
+            }}>
               <Search size={20} />
             </button>
             <input
               type="text"
               className={`searchInput ${isSearchOpen ? "open" : ""}`}
-              placeholder="Titles, people, genres"
+              placeholder="Search movies, TV shows..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onFocus={() => {
-                if (searchResults.length > 0) setShowDropdown(true);
-              }}
+              onChange={e => setSearchQuery(e.target.value)}
+              onFocus={() => { if (searchResults.length > 0) setShowDropdown(true); }}
             />
           </form>
 
           {showDropdown && searchResults.length > 0 && (
-            <div
-              className="searchDropdown"
-              style={{
-                position: "absolute",
-                top: "100%",
-                right: 0,
-                width: "300px",
-                backgroundColor: "var(--surface-color)",
-                borderRadius: "0 0 4px 4px",
-                boxShadow: "0 4px 6px rgba(0,0,0,0.5)",
-                zIndex: 1001,
-                maxHeight: "400px",
-                overflowY: "auto",
-              }}
-            >
-              {searchResults.slice(0, 5).map((item) => (
+            <div style={{
+              position: "absolute", top: "100%", right: 0, width: "300px",
+              backgroundColor: "#141414", borderRadius: "0 0 8px 8px",
+              boxShadow: "0 8px 24px rgba(0,0,0,0.7)", zIndex: 1001,
+              maxHeight: "420px", overflowY: "auto", border: "1px solid #222"
+            }}>
+              {searchResults.slice(0, 6).map(item => (
                 <Link
                   key={item.id}
                   to={`/detail/${item.detailPath}`}
-                  className="searchItem"
-                  onClick={() => {
-                    setShowDropdown(false);
-                    setIsSearchOpen(false);
-                    setSearchQuery("");
-                  }}
+                  onClick={() => { setShowDropdown(false); setIsSearchOpen(false); setSearchQuery(""); }}
                   style={{
-                    display: "flex",
-                    gap: "10px",
-                    padding: "10px",
-                    borderBottom: "1px solid rgba(255,255,255,0.1)",
-                    color: "white",
-                    alignItems: "center",
+                    display: "flex", gap: "12px", padding: "10px 12px",
+                    borderBottom: "1px solid #1a1a1a", color: "white",
+                    alignItems: "center", textDecoration: "none"
                   }}
                 >
-                  <img
-                    src={item.poster}
-                    alt={item.title}
-                    style={{
-                      width: "40px",
-                      height: "60px",
-                      objectFit: "cover",
-                    }}
+                  <img src={item.poster} alt={item.title}
+                    style={{ width: "38px", height: "56px", objectFit: "cover", borderRadius: "4px", flexShrink: 0 }}
+                    onError={e => e.target.style.display='none'}
                   />
                   <div>
-                    <div style={{ fontWeight: "bold", fontSize: "0.9rem" }}>
-                      {item.title}
-                    </div>
-                    <div style={{ fontSize: "0.8rem", color: "#aaa" }}>
-                      {item.year} • {item.rating}
+                    <div style={{ fontWeight: 600, fontSize: "0.88rem", lineHeight: 1.3 }}>{item.title}</div>
+                    <div style={{ fontSize: "0.75rem", color: "#888", marginTop: "2px" }}>
+                      {item.year} • {item.type} • ⭐ {item.rating}
                     </div>
                   </div>
                 </Link>
               ))}
               <div
-                onClick={handleSearchSubmit}
+                onClick={handleSubmit}
                 style={{
-                  padding: "10px",
-                  textAlign: "center",
-                  cursor: "pointer",
-                  color: "var(--primary-color)",
-                  fontWeight: "bold",
-                  fontSize: "0.9rem",
+                  padding: "10px", textAlign: "center", cursor: "pointer",
+                  color: "var(--primary-color, #e50914)", fontWeight: 600, fontSize: "0.85rem",
+                  borderTop: "1px solid #1a1a1a"
                 }}
               >
                 See all results for "{searchQuery}"
@@ -185,10 +127,7 @@ const Navbar = () => {
           )}
         </div>
 
-        <button
-          className="iconButton mobileMenuBtn"
-          onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-        >
+        <button className="iconButton mobileMenuBtn" onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}>
           {isMobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
         </button>
       </div>
