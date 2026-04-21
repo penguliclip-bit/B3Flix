@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { SERVERS } from '../../services/api';
 import {
   Subtitles, ChevronDown, X, Check, Loader, AlertCircle,
-  RefreshCw, Upload, Settings, Bug
+  RefreshCw, Upload, Settings, Bug, Zap
 } from 'lucide-react';
 
 // ============================================================
@@ -28,10 +28,51 @@ const PROXIES = [
 ];
 
 // ── Language maps ────────────────────────────────────────────────────────
-const FLAG = { id:'🇮🇩',ind:'🇮🇩',ID:'🇮🇩', en:'🇺🇸',eng:'🇺🇸',EN:'🇺🇸', ja:'🇯🇵',jpn:'🇯🇵', ko:'🇰🇷',kor:'🇰🇷', zh:'🇨🇳',zho:'🇨🇳', ar:'🇸🇦',ara:'🇸🇦', es:'🇪🇸',spa:'🇪🇸', pt:'🇧🇷',por:'🇧🇷', fr:'🇫🇷', de:'🇩🇪' };
-const NAME = { id:'Indonesian',ind:'Indonesian',ID:'Indonesian', en:'English',eng:'English',EN:'English', ja:'Japanese',jpn:'Japanese', ko:'Korean',kor:'Korean', zh:'Chinese',zho:'Chinese', ar:'Arabic',ara:'Arabic', es:'Spanish',spa:'Spanish', pt:'Portuguese',por:'Portuguese', fr:'French', de:'German' };
+const FLAG = {
+  id:'🇮🇩',ind:'🇮🇩',ID:'🇮🇩',
+  en:'🇺🇸',eng:'🇺🇸',EN:'🇺🇸',
+  ja:'🇯🇵',jpn:'🇯🇵',
+  ko:'🇰🇷',kor:'🇰🇷',
+  zh:'🇨🇳',zho:'🇨🇳','zh-cn':'🇨🇳',
+  ar:'🇸🇦',ara:'🇸🇦',
+  es:'🇪🇸',spa:'🇪🇸',
+  pt:'🇧🇷',por:'🇧🇷',
+  fr:'🇫🇷',fre:'🇫🇷',
+  de:'🇩🇪',ger:'🇩🇪',
+  it:'🇮🇹',ita:'🇮🇹',
+  ru:'🇷🇺',rus:'🇷🇺',
+  th:'🇹🇭',tha:'🇹🇭',
+  vi:'🇻🇳',vie:'🇻🇳',
+  ms:'🇲🇾',may:'🇲🇾',
+  hi:'🇮🇳',hin:'🇮🇳',
+  tr:'🇹🇷',tur:'🇹🇷',
+  nl:'🇳🇱',dut:'🇳🇱',
+  pl:'🇵🇱',pol:'🇵🇱',
+};
+const NAME = {
+  id:'Indonesia',ind:'Indonesia',ID:'Indonesia',
+  en:'English',eng:'English',EN:'English',
+  ja:'日本語',jpn:'日本語',
+  ko:'한국어',kor:'한국어',
+  zh:'中文',zho:'中文','zh-cn':'中文',
+  ar:'العربية',ara:'العربية',
+  es:'Español',spa:'Español',
+  pt:'Português',por:'Português',
+  fr:'Français',fre:'Français',
+  de:'Deutsch',ger:'Deutsch',
+  it:'Italiano',ita:'Italiano',
+  ru:'Русский',rus:'Русский',
+  th:'ภาษาไทย',tha:'ภาษาไทย',
+  vi:'Tiếng Việt',vie:'Tiếng Việt',
+  ms:'Melayu',may:'Melayu',
+  hi:'हिन्दी',hin:'हिन्दी',
+  tr:'Türkçe',tur:'Türkçe',
+  nl:'Nederlands',dut:'Nederlands',
+  pl:'Polski',pol:'Polski',
+};
 const getLangFlag = c => FLAG[c] || FLAG[c?.toLowerCase()] || '🌐';
 const getLangName = c => NAME[c] || NAME[c?.toLowerCase()] || (c?.toUpperCase() || '?');
+const getLang     = c => `${getLangFlag(c)} ${getLangName(c)}`;
 const isIndo = c => ['id','ind','ID','in','IN'].includes(c);
 const isEng  = c => ['en','eng','EN'].includes(c);
 
@@ -195,7 +236,7 @@ const searchOSv1 = async (tmdbId, type, season, episode) => {
     const url = new URL(`${OS_API_BASE}/subtitles`);
     url.searchParams.set('tmdb_id', tmdbId);
     url.searchParams.set('type', type === 'tv' ? 'episode' : 'movie');
-    url.searchParams.set('languages', 'id,en,ja,ko');
+    url.searchParams.set('languages', 'id,en,ja,ko,zh,ar,es,pt,fr,de,it,ru,th,vi,ms,hi,tr,nl,pl');
     url.searchParams.set('order_by', 'download_count');
     if (season)  url.searchParams.set('season_number',  season);
     if (episode) url.searchParams.set('episode_number', episode);
@@ -404,6 +445,10 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
       if (imdbId) {
         promises.push(searchOSLegacy(imdbId, 'ind', s, e));
         promises.push(searchOSLegacy(imdbId, 'eng', s, e));
+        promises.push(searchOSLegacy(imdbId, 'jpn', s, e));
+        promises.push(searchOSLegacy(imdbId, 'kor', s, e));
+        promises.push(searchOSLegacy(imdbId, 'zho', s, e));
+        promises.push(searchOSLegacy(imdbId, 'may', s, e));
       }
 
       return Promise.all(promises).then(results => {
@@ -428,10 +473,11 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
 
     setAutoLoaded(true); // Set DULU sebelum async — cegah infinite loop
 
-    // Buat urutan kandidat: semua Indo (by downloads), lalu semua English
+    // Buat urutan kandidat: semua Indo (by downloads), lalu semua English, lalu bahasa lain
     const indoSubs = allSubs.filter(s => isIndo(s.lang));
     const engSubs  = allSubs.filter(s => isEng(s.lang));
-    const candidates = [...indoSubs, ...engSubs];
+    const otherSubs = allSubs.filter(s => !isIndo(s.lang) && !isEng(s.lang));
+    const candidates = [...indoSubs, ...engSubs, ...otherSubs];
     if (!candidates.length) return;
 
     // Coba satu per satu sampai berhasil
