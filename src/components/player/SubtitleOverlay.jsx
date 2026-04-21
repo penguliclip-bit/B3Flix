@@ -1,330 +1,431 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { subtitleApi, parseSrt } from '../../services/api';
-import { Subtitles, ChevronDown, X, Check, Loader } from 'lucide-react';
+import { Subtitles, ChevronDown, X, Check, Loader, AlertCircle } from 'lucide-react';
 
-const LANGUAGES = [
-  { code: 'id', label: '🇮🇩 Indonesia' },
-  { code: 'en', label: '🇺🇸 English' },
-  { code: 'ja', label: '🇯🇵 Japanese' },
-  { code: 'ko', label: '🇰🇷 Korean' },
-  { code: 'zh-CN', label: '🇨🇳 Chinese' },
-  { code: 'ar', label: '🇸🇦 Arabic' },
-];
+// ============================================================
+//  Subtitle Service - SUBDL (gratis, no key) + OS fallback
+//  CORS enabled, work dari browser
+// ============================================================
 
-const SubtitleOverlay = ({ tmdbId, mediaType = 'movie', season = null, episode = null }) => {
-  const [subtitleList, setSubtitleList] = useState([]);
-  const [selectedLang, setSelectedLang] = useState(null);
-  const [selectedSub, setSelectedSub]   = useState(null);
-  const [subtitleCues, setSubtitleCues] = useState([]);
-  const [currentCue, setCurrentCue]     = useState(null);
-  const [elapsed, setElapsed]           = useState(0);
-  const [showPanel, setShowPanel]       = useState(false);
-  const [loading, setLoading]           = useState(false);
-  const [loadingList, setLoadingList]   = useState(false);
-  const [status, setStatus]             = useState('');
-  const [fontSize, setFontSize]         = useState(20);
-  const [subEnabled, setSubEnabled]     = useState(true);
-  const [offset, setOffset]             = useState(0); // detik, untuk timing adjust
+const SUBDL_BASE = "https://api.subdl.com/api/v1";
+const SUBDL_DL   = "https://dl.subdl.com";
+const OS_BASE    = "https://api.opensubtitles.com/api/v1";
+const OS_KEY     = "s2LOv0ug7sFWJGPJeO4y8VQ64oX1FCXW";
+const CORS_PROXY = "https://api.allorigins.win/get?url=";
 
-  const timerRef = useRef(null);
-  const startTimeRef = useRef(null);
+const LANG_MAP = {
+  ID: '🇮🇩 Indonesia', IN: '🇮🇩 Indonesia', id: '🇮🇩 Indonesia', ind: '🇮🇩 Indonesia',
+  EN: '🇺🇸 English',   en: '🇺🇸 English',   eng: '🇺🇸 English',
+  JA: '🇯🇵 Japanese',  ja: '🇯🇵 Japanese',  jpn: '🇯🇵 Japanese',
+  KO: '🇰🇷 Korean',    ko: '🇰🇷 Korean',    kor: '🇰🇷 Korean',
+  ZH: '🇨🇳 Chinese',   zh: '🇨🇳 Chinese',   zho: '🇨🇳 Chinese',
+  AR: '🇸🇦 Arabic',    ar: '🇦🇷 Arabic',    ara: '🇸🇦 Arabic',
+};
+const getLang = (code) => LANG_MAP[code] || code?.toUpperCase() || '?';
 
-  // Jalankan timer internal untuk track waktu
+// Cari subtitle via SUBDL
+const searchSubdl = async (tmdbId, type = 'movie') => {
+  try {
+    const url = `${SUBDL_BASE}/subtitles?tmdb_id=${tmdbId}&type=${type}&langs=ID,EN,JA,KO&full_season=0`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    const subs = data.subtitles || [];
+    // Normalise ke format umum
+    return subs.map(s => ({
+      source: 'subdl',
+      id: s.sd_id || s.url,
+      lang: s.lang || 'EN',
+      name: s.release_name || s.name || 'Subtitle',
+      downloads: s.downloads || 0,
+      hi: s.hi || false,
+      url: s.url, // relative path, prepend SUBDL_DL
+    }));
+  } catch (e) {
+    console.warn('SUBDL search failed:', e.message);
+    return [];
+  }
+};
+
+// Cari subtitle via OpenSubtitles (fallback)
+const searchOS = async (tmdbId, type = 'movie') => {
+  try {
+    const url = `${OS_BASE}/subtitles?tmdb_id=${tmdbId}&type=${type === 'tv' ? 'episode' : 'movie'}&languages=id,en&order_by=download_count`;
+    const res = await fetch(url, {
+      headers: { 'Api-Key': OS_KEY, 'User-Agent': 'B3Flix v1.0' }
+    });
+    if (!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    return (data.data || []).map(s => ({
+      source: 'os',
+      id: s.id,
+      lang: s.attributes?.language || 'en',
+      name: s.attributes?.release || s.attributes?.files?.[0]?.file_name || 'Subtitle',
+      downloads: s.attributes?.download_count || 0,
+      fileId: s.attributes?.files?.[0]?.file_id,
+    }));
+  } catch (e) {
+    console.warn('OpenSubtitles search failed:', e.message);
+    return [];
+  }
+};
+
+// Download & parse SRT
+const fetchSrt = async (sub) => {
+  let rawUrl = '';
+
+  if (sub.source === 'subdl') {
+    rawUrl = `${SUBDL_DL}${sub.url}`;
+  } else if (sub.source === 'os') {
+    // OS butuh download token request
+    const res = await fetch(`${OS_BASE}/download`, {
+      method: 'POST',
+      headers: { 'Api-Key': OS_KEY, 'User-Agent': 'B3Flix v1.0', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_id: sub.fileId }),
+    });
+    const data = await res.json();
+    rawUrl = data.link || '';
+  }
+
+  if (!rawUrl) throw new Error('No URL');
+
+  // Fetch via CORS proxy
+  const proxyRes = await fetch(`${CORS_PROXY}${encodeURIComponent(rawUrl)}`);
+  const json = await proxyRes.json();
+  const text = json.contents || '';
+
+  // File bisa .zip (subdl kadang zip) atau .srt langsung
+  if (!text || text.length < 10) throw new Error('Empty content');
+
+  return parseSrt(text);
+};
+
+// Parse SRT → array cue
+const parseSrt = (text) => {
+  const blocks = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split(/\n\n+/).filter(Boolean);
+  return blocks.map(block => {
+    const lines = block.trim().split('\n');
+    const ti = lines.findIndex(l => l.includes('-->'));
+    if (ti === -1) return null;
+    const [st, et] = lines[ti].split('-->').map(s => s.trim());
+    const txt = lines.slice(ti + 1).join('\n').replace(/<[^>]+>/g, '').replace(/\{[^}]+\}/g, '').trim();
+    if (!txt) return null;
+    return { start: toSec(st), end: toSec(et), text: txt };
+  }).filter(Boolean);
+};
+
+const toSec = (s) => {
+  if (!s) return 0;
+  const [h, m, sec] = s.replace(',', '.').split(':');
+  return +h * 3600 + +m * 60 + parseFloat(sec);
+};
+
+// ============================================================
+//  SubtitleOverlay Component
+// ============================================================
+const SubtitleOverlay = ({ tmdbId, mediaType = 'movie', season, episode }) => {
+  const [allSubs, setAllSubs]       = useState([]);
+  const [selected, setSelected]     = useState(null);
+  const [cues, setCues]             = useState([]);
+  const [currentCue, setCurrentCue] = useState(null);
+  const [elapsed, setElapsed]       = useState(0);
+  const [showPanel, setShowPanel]   = useState(false);
+  const [enabled, setEnabled]       = useState(true);
+  const [loading, setLoading]       = useState(false);
+  const [listLoading, setListLoading] = useState(false);
+  const [status, setStatus]         = useState('');
+  const [fontSize, setFontSize]     = useState(20);
+  const [offset, setOffset]         = useState(0);
+  const [error, setError]           = useState('');
+
+  const timerRef    = useRef(null);
+  const startRef    = useRef(null);
+  const pausedRef   = useRef(false);
+
+  // Timer
   const startTimer = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
-    startTimeRef.current = Date.now() - elapsed * 1000;
+    startRef.current = Date.now() - elapsed * 1000;
     timerRef.current = setInterval(() => {
-      const secs = (Date.now() - startTimeRef.current) / 1000;
-      setElapsed(secs);
-    }, 250);
+      if (!pausedRef.current) {
+        setElapsed((Date.now() - startRef.current) / 1000);
+      }
+    }, 200);
   }, [elapsed]);
 
   useEffect(() => {
-    // Auto-start timer saat subtitle dimuat
-    if (subtitleCues.length > 0) startTimer();
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [subtitleCues]);
+    if (cues.length > 0) startTimer();
+    return () => clearInterval(timerRef.current);
+  }, [cues]);
 
-  // Cari cue yang aktif berdasarkan elapsed
+  // Active cue
   useEffect(() => {
-    if (!subtitleCues.length || !subEnabled) { setCurrentCue(null); return; }
-    const adjElapsed = elapsed + offset;
-    const cue = subtitleCues.find(c => adjElapsed >= c.start && adjElapsed <= c.end);
-    setCurrentCue(cue || null);
-  }, [elapsed, subtitleCues, subEnabled, offset]);
+    if (!cues.length || !enabled) { setCurrentCue(null); return; }
+    const adj = elapsed + offset;
+    setCurrentCue(cues.find(c => adj >= c.start && adj <= c.end) || null);
+  }, [elapsed, cues, enabled, offset]);
 
-  // Load subtitle list ketika tmdbId berubah
+  // Load subtitle list
   useEffect(() => {
     if (!tmdbId) return;
-    setSubtitleList([]); setSelectedSub(null); setSubtitleCues([]); setCurrentCue(null);
-    setStatus('');
+    setAllSubs([]); setSelected(null); setCues([]); setCurrentCue(null);
+    setStatus(''); setError('');
+    setListLoading(true);
 
-    setLoadingList(true);
-    subtitleApi.searchSubtitles(tmdbId, mediaType, 'id,en,ja,ko')
-      .then(results => {
-        setSubtitleList(results);
-        // Auto-pilih subtitle Indonesia jika ada
-        const indo = results.find(s =>
-          s.attributes?.language === 'id' ||
-          s.attributes?.language === 'ind'
-        );
-        if (indo) {
-          setStatus('Subtitle Indonesia tersedia ✓');
-        } else {
-          setStatus(results.length > 0 ? `${results.length} subtitle tersedia` : 'Subtitle tidak tersedia');
-        }
-      })
-      .catch(() => setStatus('Gagal memuat daftar subtitle'))
-      .finally(() => setLoadingList(false));
+    Promise.all([
+      searchSubdl(tmdbId, mediaType),
+      searchOS(tmdbId, mediaType),
+    ]).then(([subdlSubs, osSubs]) => {
+      // Merge, prioritaskan Indo di atas
+      const merged = [...subdlSubs, ...osSubs];
+      const deduped = merged.filter((s, i, arr) =>
+        arr.findIndex(x => x.id === s.id) === i
+      );
+      const sorted = deduped.sort((a, b) => {
+        const prio = (s) => (s.lang === 'ID' || s.lang === 'id' || s.lang === 'ind') ? 0 : 1;
+        return prio(a) - prio(b) || b.downloads - a.downloads;
+      });
+
+      setAllSubs(sorted);
+      const indoCount = sorted.filter(s => ['ID','id','ind','IN'].includes(s.lang)).length;
+
+      if (indoCount > 0) {
+        setStatus(`✓ ${indoCount} subtitle Indonesia tersedia`);
+      } else if (sorted.length > 0) {
+        setStatus(`${sorted.length} subtitle tersedia (belum ada Indo)`);
+      } else {
+        setStatus('');
+        setError('Subtitle belum tersedia — film mungkin terlalu baru');
+      }
+    }).finally(() => setListLoading(false));
   }, [tmdbId, mediaType]);
 
-  // Load & parse subtitle file
-  const loadSubtitle = async (sub) => {
-    setLoading(true);
-    setStatus('Mengunduh subtitle...');
-    setSubtitleCues([]);
-    setCurrentCue(null);
-
+  const handleLoad = async (sub) => {
+    setLoading(true); setError('');
+    setStatus(`Mengunduh subtitle ${getLang(sub.lang)}...`);
+    setCues([]); setCurrentCue(null);
     try {
-      const fileId = sub.attributes?.files?.[0]?.file_id;
-      if (!fileId) throw new Error('No file ID');
-
-      const link = await subtitleApi.getDownloadLink(fileId);
-      if (!link) throw new Error('No download link');
-
-      const cues = await subtitleApi.fetchAndParseSrt(link);
-      if (!cues.length) throw new Error('Empty subtitle');
-
-      setSubtitleCues(cues);
-      setSelectedSub(sub);
+      const parsed = await fetchSrt(sub);
+      if (!parsed.length) throw new Error('Subtitle kosong atau format tidak didukung');
+      setCues(parsed);
+      setSelected(sub);
       setElapsed(0);
-      startTimeRef.current = Date.now();
-      setStatus(`✓ Subtitle dimuat (${cues.length} baris)`);
+      startRef.current = Date.now();
+      setStatus(`✓ Subtitle dimuat — ${parsed.length} baris`);
       setShowPanel(false);
+      setOffset(0);
     } catch (e) {
-      console.error('Load subtitle error:', e);
-      setStatus('Gagal memuat subtitle. Coba yang lain.');
+      setError(`Gagal memuat: ${e.message}. Coba subtitle lain.`);
+      setStatus('');
     } finally {
       setLoading(false);
     }
   };
 
-  const groupedByLang = subtitleList.reduce((acc, sub) => {
-    const lang = sub.attributes?.language || 'unknown';
-    if (!acc[lang]) acc[lang] = [];
-    acc[lang].push(sub);
+  // Group by lang
+  const grouped = allSubs.reduce((acc, s) => {
+    const k = s.lang;
+    if (!acc[k]) acc[k] = [];
+    acc[k].push(s);
     return acc;
   }, {});
 
-  const getLangLabel = (code) => {
-    const found = LANGUAGES.find(l => l.code === code || l.code === code?.replace('ind', 'id'));
-    if (found) return found.label;
-    const names = { id: '🇮🇩 Indonesia', ind: '🇮🇩 Indonesia', en: '🇺🇸 English', eng: '🇺🇸 English', ja: '🇯🇵 Japanese', jpn: '🇯🇵 Japanese', ko: '🇰🇷 Korean', kor: '🇰🇷 Korean' };
-    return names[code] || code?.toUpperCase();
-  };
+  // Sort groups: Indo first
+  const langOrder = ['ID', 'id', 'ind', 'IN', 'EN', 'en', 'eng'];
+  const sortedGroups = Object.entries(grouped).sort(([a], [b]) => {
+    const ai = langOrder.indexOf(a);
+    const bi = langOrder.indexOf(b);
+    if (ai === -1 && bi === -1) return a.localeCompare(b);
+    if (ai === -1) return 1;
+    if (bi === -1) return -1;
+    return ai - bi;
+  });
 
   return (
     <>
-      {/* Subtitle Overlay - ditampilkan di bawah player */}
-      <div style={{ position: 'relative', width: '100%' }}>
-
-        {/* Subtitle Text Display */}
-        {subtitleCues.length > 0 && (
-          <div style={{
-            position: 'absolute', bottom: '0', left: '0', right: '0',
-            display: 'flex', justifyContent: 'center', pointerEvents: 'none',
-            zIndex: 10, padding: '0 8px 8px',
+      {/* Controls bar */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: '8px',
+        padding: '8px 2px', flexWrap: 'wrap',
+        borderTop: '1px solid #1a1a1a', marginTop: '6px',
+        justifyContent: 'space-between',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          {/* Toggle */}
+          <button onClick={() => setEnabled(v => !v)} style={{
+            display: 'flex', alignItems: 'center', gap: '6px',
+            padding: '5px 12px', borderRadius: '6px', border: 'none', cursor: 'pointer',
+            backgroundColor: enabled ? 'var(--primary-color,#e50914)' : '#2a2a2a',
+            color: '#fff', fontSize: '0.8rem', fontWeight: 600,
           }}>
-            <div style={{
-              backgroundColor: 'rgba(0,0,0,0.85)',
-              color: '#fff',
-              padding: '6px 16px',
-              borderRadius: '4px',
-              fontSize: `${fontSize}px`,
-              lineHeight: 1.4,
-              textAlign: 'center',
-              maxWidth: '90%',
-              whiteSpace: 'pre-line',
-              textShadow: '1px 1px 2px #000',
-              minHeight: '2em',
-              transition: 'opacity 0.15s',
-              opacity: currentCue ? 1 : 0,
-            }}>
-              {currentCue?.text || ''}
-            </div>
-          </div>
-        )}
+            <Subtitles size={15} />
+            Sub {enabled ? 'ON' : 'OFF'}
+          </button>
 
-        {/* Controls Bar */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '8px',
-          padding: '8px 4px', flexWrap: 'wrap', justifyContent: 'space-between',
-          borderTop: '1px solid #1a1a1a', marginTop: '4px'
-        }}>
-          {/* Left: status & controls */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            {/* Subtitle toggle */}
-            <button
-              onClick={() => setSubEnabled(v => !v)}
-              title={subEnabled ? 'Nonaktifkan subtitle' : 'Aktifkan subtitle'}
-              style={{
-                display: 'flex', alignItems: 'center', gap: '6px',
-                padding: '5px 12px', borderRadius: '6px', border: 'none', cursor: 'pointer',
-                backgroundColor: subEnabled ? 'var(--primary-color, #e50914)' : '#2a2a2a',
-                color: 'white', fontSize: '0.8rem', fontWeight: 600,
-              }}
-            >
-              <Subtitles size={16} />
-              Subtitle {subEnabled ? 'ON' : 'OFF'}
-            </button>
+          {/* Picker */}
+          <button onClick={() => setShowPanel(v => !v)} style={{
+            display: 'flex', alignItems: 'center', gap: '5px',
+            padding: '5px 12px', borderRadius: '6px',
+            border: '1px solid #333', backgroundColor: '#1a1a1a',
+            color: '#fff', fontSize: '0.78rem', cursor: 'pointer',
+          }}>
+            {listLoading
+              ? <Loader size={13} style={{ animation: 'spin 1s linear infinite' }} />
+              : <ChevronDown size={13} />
+            }
+            {selected ? `${getLang(selected.lang)}` : 'Pilih Subtitle'}
+          </button>
 
-            {/* Subtitle picker button */}
-            <button
-              onClick={() => setShowPanel(v => !v)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: '5px',
-                padding: '5px 12px', borderRadius: '6px', border: '1px solid #333',
-                backgroundColor: '#1a1a1a', color: 'white', fontSize: '0.78rem', cursor: 'pointer',
-              }}
-            >
-              {loadingList ? <Loader size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <ChevronDown size={14} />}
-              {selectedSub
-                ? getLangLabel(selectedSub.attributes?.language)
-                : 'Pilih Subtitle'}
-            </button>
-
-            {/* Status text */}
-            {status && (
-              <span style={{ fontSize: '0.72rem', color: status.includes('✓') ? '#4ade80' : '#aaa' }}>
-                {status}
-              </span>
-            )}
-          </div>
-
-          {/* Right: timing + font size controls (saat subtitle aktif) */}
-          {subtitleCues.length > 0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-              {/* Timing offset */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '0.75rem', color: '#aaa' }}>
-                <span>Timing:</span>
-                <button onClick={() => setOffset(o => o - 0.5)} style={miniBtn}>-0.5s</button>
-                <span style={{ color: offset === 0 ? '#666' : '#fff', minWidth: '40px', textAlign: 'center' }}>
-                  {offset > 0 ? '+' : ''}{offset.toFixed(1)}s
-                </span>
-                <button onClick={() => setOffset(o => o + 0.5)} style={miniBtn}>+0.5s</button>
-                {offset !== 0 && (
-                  <button onClick={() => setOffset(0)} style={{ ...miniBtn, color: '#e50914' }}>✕</button>
-                )}
-              </div>
-
-              {/* Font size */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '0.75rem', color: '#aaa' }}>
-                <span>Size:</span>
-                <button onClick={() => setFontSize(s => Math.max(12, s - 2))} style={miniBtn}>A-</button>
-                <span style={{ color: '#fff', minWidth: '28px', textAlign: 'center' }}>{fontSize}</span>
-                <button onClick={() => setFontSize(s => Math.min(36, s + 2))} style={miniBtn}>A+</button>
-              </div>
-
-              {/* Reset timer */}
-              <button
-                onClick={() => { setElapsed(0); startTimeRef.current = Date.now(); }}
-                title="Reset timer ke 00:00"
-                style={{ ...miniBtn, padding: '3px 8px' }}
-              >
-                ↺ Reset
-              </button>
-            </div>
+          {/* Status / error */}
+          {status && <span style={{ fontSize: '0.72rem', color: status.startsWith('✓') ? '#4ade80' : '#aaa' }}>{status}</span>}
+          {error && !showPanel && (
+            <span style={{ fontSize: '0.72rem', color: '#f87171', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <AlertCircle size={12} /> {error}
+            </span>
           )}
         </div>
+
+        {/* Timing & size controls */}
+        {cues.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '0.72rem', color: '#555' }}>Timing:</span>
+            <button onClick={() => setOffset(o => +(o - 0.5).toFixed(1))} style={mBtn}>-0.5s</button>
+            <span style={{ fontSize: '0.72rem', color: offset !== 0 ? '#fff' : '#444', minWidth: '38px', textAlign: 'center' }}>
+              {offset > 0 ? '+' : ''}{offset.toFixed(1)}s
+            </span>
+            <button onClick={() => setOffset(o => +(o + 0.5).toFixed(1))} style={mBtn}>+0.5s</button>
+            {offset !== 0 && <button onClick={() => setOffset(0)} style={{ ...mBtn, color: '#f87171' }}>✕</button>}
+            <span style={{ fontSize: '0.72rem', color: '#555', marginLeft: '4px' }}>Size:</span>
+            <button onClick={() => setFontSize(s => Math.max(12, s - 2))} style={mBtn}>A-</button>
+            <span style={{ fontSize: '0.72rem', color: '#aaa', minWidth: '22px', textAlign: 'center' }}>{fontSize}</span>
+            <button onClick={() => setFontSize(s => Math.min(36, s + 2))} style={mBtn}>A+</button>
+            <button onClick={() => { setElapsed(0); startRef.current = Date.now(); }}
+              style={{ ...mBtn, padding: '3px 8px' }} title="Reset timer ke awal">↺</button>
+          </div>
+        )}
       </div>
+
+      {/* Subtitle text display — di bawah player */}
+      {cues.length > 0 && enabled && (
+        <div style={{
+          minHeight: '44px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '4px 8px', marginBottom: '4px',
+        }}>
+          <div style={{
+            backgroundColor: 'rgba(0,0,0,0.88)',
+            color: '#fff', padding: '6px 18px',
+            borderRadius: '5px', fontSize: `${fontSize}px`,
+            lineHeight: 1.45, textAlign: 'center',
+            maxWidth: '90%', whiteSpace: 'pre-line',
+            textShadow: '1px 1px 3px #000',
+            opacity: currentCue ? 1 : 0,
+            transition: 'opacity 0.15s',
+            minWidth: '60px',
+          }}>
+            {currentCue?.text || '\u00A0'}
+          </div>
+        </div>
+      )}
 
       {/* Subtitle Picker Panel */}
       {showPanel && (
         <div style={{
-          backgroundColor: '#111', border: '1px solid #2a2a2a',
-          borderRadius: '8px', padding: '16px', marginTop: '4px',
-          maxHeight: '320px', overflowY: 'auto',
+          backgroundColor: '#0f0f0f', border: '1px solid #222',
+          borderRadius: '10px', padding: '16px', marginTop: '4px',
+          maxHeight: '350px', overflowY: 'auto',
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
             <h3 style={{ margin: 0, fontSize: '0.9rem', color: '#fff' }}>
-              Pilih Subtitle ({subtitleList.length} tersedia)
+              Pilih Subtitle ({allSubs.length} tersedia)
             </h3>
-            <button onClick={() => setShowPanel(false)} style={{ background: 'none', border: 'none', color: '#aaa', cursor: 'pointer' }}>
-              <X size={18} />
+            <button onClick={() => setShowPanel(false)}
+              style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer' }}>
+              <X size={17} />
             </button>
           </div>
 
-          {loadingList && (
-            <div style={{ textAlign: 'center', color: '#aaa', padding: '20px' }}>
-              <Loader size={24} style={{ animation: 'spin 1s linear infinite' }} />
-              <div style={{ marginTop: '8px', fontSize: '0.85rem' }}>Mencari subtitle...</div>
+          {listLoading && (
+            <div style={{ textAlign: 'center', padding: '24px', color: '#666' }}>
+              <Loader size={22} style={{ animation: 'spin 1s linear infinite' }} />
+              <div style={{ marginTop: '8px', fontSize: '0.82rem' }}>Mencari subtitle...</div>
             </div>
           )}
 
-          {!loadingList && subtitleList.length === 0 && (
-            <p style={{ color: '#666', fontSize: '0.85rem', textAlign: 'center', padding: '20px' }}>
-              Tidak ada subtitle tersedia untuk konten ini.
-            </p>
+          {!listLoading && allSubs.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '24px' }}>
+              <AlertCircle size={32} style={{ color: '#555', marginBottom: '10px' }} />
+              <div style={{ color: '#888', fontSize: '0.85rem', marginBottom: '6px' }}>
+                Subtitle belum tersedia untuk film ini
+              </div>
+              <div style={{ color: '#555', fontSize: '0.75rem', lineHeight: 1.5 }}>
+                Film baru biasanya belum memiliki subtitle.<br />
+                Coba cek lagi beberapa hari/minggu kemudian.
+              </div>
+            </div>
           )}
 
-          {/* Group by language */}
-          {Object.entries(groupedByLang).map(([lang, subs]) => (
-            <div key={lang} style={{ marginBottom: '12px' }}>
-              <div style={{ fontSize: '0.75rem', color: '#888', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                {getLangLabel(lang)}
+          {/* Grouped subtitle list */}
+          {sortedGroups.map(([lang, subs]) => (
+            <div key={lang} style={{ marginBottom: '14px' }}>
+              <div style={{
+                fontSize: '0.72rem', color: '#666', marginBottom: '6px',
+                textTransform: 'uppercase', letterSpacing: '0.8px',
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}>
+                {getLang(lang)}
+                <span style={{ color: '#333', fontWeight: 400 }}>({subs.length})</span>
               </div>
-              {subs.slice(0, 5).map((sub, idx) => {
-                const attr = sub.attributes || {};
-                const isSelected = selectedSub?.id === sub.id;
-                const fileName = attr.release || attr.files?.[0]?.file_name || `Subtitle ${idx + 1}`;
-                const downloads = attr.download_count || 0;
-                const rating = attr.ratings ? `★ ${Number(attr.ratings).toFixed(1)}` : '';
-
+              {subs.slice(0, 6).map((sub, i) => {
+                const isSel = selected?.id === sub.id;
+                const isLoading = loading && isSel;
                 return (
-                  <button
-                    key={sub.id || idx}
-                    onClick={() => loadSubtitle(sub)}
+                  <button key={sub.id || i}
+                    onClick={() => handleLoad(sub)}
                     disabled={loading}
                     style={{
-                      display: 'flex', alignItems: 'flex-start', gap: '10px',
+                      display: 'flex', alignItems: 'center', gap: '10px',
                       width: '100%', padding: '8px 10px', marginBottom: '4px',
-                      backgroundColor: isSelected ? '#1a1a3e' : '#1a1a1a',
-                      border: isSelected ? '1px solid #4444cc' : '1px solid #2a2a2a',
-                      borderRadius: '6px', color: 'white', cursor: loading ? 'wait' : 'pointer',
-                      textAlign: 'left', transition: 'all 0.15s',
+                      backgroundColor: isSel ? '#0d1a4a' : '#141414',
+                      border: `1px solid ${isSel ? '#2244cc' : '#222'}`,
+                      borderRadius: '7px', color: '#fff',
+                      cursor: loading ? 'wait' : 'pointer',
+                      textAlign: 'left', transition: 'border-color 0.15s, background 0.15s',
                     }}
                   >
-                    {isSelected && <Check size={16} style={{ color: '#4ade80', flexShrink: 0, marginTop: '2px' }} />}
+                    {isSel && !isLoading && <Check size={14} style={{ color: '#4ade80', flexShrink: 0 }} />}
+                    {isLoading && <Loader size={14} style={{ animation: 'spin 1s linear infinite', flexShrink: 0 }} />}
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: '0.8rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {fileName}
+                      <div style={{
+                        fontSize: '0.8rem', overflow: 'hidden',
+                        textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        color: isSel ? '#a5b4fc' : '#ddd',
+                      }}>
+                        {sub.name}
                       </div>
-                      <div style={{ fontSize: '0.7rem', color: '#666', marginTop: '2px' }}>
-                        {downloads.toLocaleString()} downloads {rating && `• ${rating}`}
+                      <div style={{ fontSize: '0.68rem', color: '#555', marginTop: '2px' }}>
+                        {sub.source === 'subdl' ? 'SUBDL' : 'OpenSubtitles'}
+                        {sub.downloads > 0 && ` • ${sub.downloads.toLocaleString()} unduhan`}
+                        {sub.hi && ' • HI'}
                       </div>
                     </div>
-                    {loading && selectedSub?.id === sub.id && (
-                      <Loader size={14} style={{ animation: 'spin 1s linear infinite', flexShrink: 0 }} />
-                    )}
                   </button>
                 );
               })}
             </div>
           ))}
 
-          <p style={{ fontSize: '0.7rem', color: '#444', marginTop: '8px', textAlign: 'center' }}>
-            Powered by OpenSubtitles.com
+          <p style={{ fontSize: '0.68rem', color: '#333', textAlign: 'center', marginTop: '8px' }}>
+            Sumber: SUBDL & OpenSubtitles
           </p>
         </div>
       )}
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </>
   );
 };
 
-const miniBtn = {
-  padding: '2px 6px', borderRadius: '4px', border: '1px solid #333',
-  backgroundColor: '#1a1a1a', color: '#ccc', cursor: 'pointer', fontSize: '0.72rem',
+const mBtn = {
+  padding: '2px 7px', borderRadius: '4px', border: '1px solid #2a2a2a',
+  backgroundColor: '#141414', color: '#bbb', cursor: 'pointer', fontSize: '0.7rem',
 };
 
 export default SubtitleOverlay;
