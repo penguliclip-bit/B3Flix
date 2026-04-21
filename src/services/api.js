@@ -353,3 +353,130 @@ export const api = {
 
   getPlayer: (tmdbId, type = "movie") => getEmbedUrl(tmdbId, type),
 };
+
+// ============================================================
+//  SUBTITLE SERVICE
+//  Menggunakan OpenSubtitles.com REST API v1 (gratis)
+//  + TMDB untuk external_ids (IMDB ID)
+// ============================================================
+
+const OS_API = "https://api.opensubtitles.com/api/v1";
+const OS_KEY = "s2LOv0ug7sFWJGPJeO4y8VQ64oX1FCXW"; // free API key
+const OS_AGENT = "B3Flix v1.0";
+
+export const subtitleApi = {
+  // Ambil IMDB ID dari TMDB
+  getImdbId: async (tmdbId, type = "movie") => {
+    try {
+      const data = await tmdbFetch(`/${type}/${tmdbId}/external_ids`);
+      return data.imdb_id || null;
+    } catch {
+      return null;
+    }
+  },
+
+  // Search subtitle di OpenSubtitles
+  searchSubtitles: async (tmdbId, type = "movie", languages = "id,en") => {
+    try {
+      const url = new URL(`${OS_API}/subtitles`);
+      url.searchParams.set("tmdb_id", tmdbId);
+      url.searchParams.set("type", type === "tv" ? "episode" : "movie");
+      url.searchParams.set("languages", languages);
+      url.searchParams.set("order_by", "download_count");
+
+      const res = await fetch(url.toString(), {
+        headers: {
+          "Api-Key": OS_KEY,
+          "User-Agent": OS_AGENT,
+          "Content-Type": "application/json",
+        },
+      });
+      if (!res.ok) throw new Error(`OS API Error: ${res.status}`);
+      const data = await res.json();
+      return data.data || [];
+    } catch (e) {
+      console.error("Subtitle search error:", e);
+      return [];
+    }
+  },
+
+  // Dapatkan download link subtitle
+  getDownloadLink: async (fileId) => {
+    try {
+      const res = await fetch(`${OS_API}/download`, {
+        method: "POST",
+        headers: {
+          "Api-Key": OS_KEY,
+          "User-Agent": OS_AGENT,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ file_id: fileId }),
+      });
+      if (!res.ok) throw new Error(`OS Download Error: ${res.status}`);
+      const data = await res.json();
+      return data.link || null;
+    } catch (e) {
+      console.error("Subtitle download error:", e);
+      return null;
+    }
+  },
+
+  // Fetch & parse .srt ke format subtitle object array
+  fetchAndParseSrt: async (url) => {
+    try {
+      // Gunakan CORS proxy karena OS memerlukan ini
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+      const res = await fetch(proxyUrl);
+      const json = await res.json();
+      const srtText = json.contents || "";
+      return parseSrt(srtText);
+    } catch (e) {
+      console.error("Fetch SRT error:", e);
+      return [];
+    }
+  },
+};
+
+// Parse SRT format ke array of {start, end, text}
+export const parseSrt = (srtText) => {
+  if (!srtText) return [];
+  const blocks = srtText
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split(/\n\n+/)
+    .filter(Boolean);
+
+  return blocks.map((block) => {
+    const lines = block.trim().split("\n");
+    if (lines.length < 2) return null;
+
+    // Cari baris timestamp
+    const timeLineIdx = lines.findIndex((l) => l.includes("-->"));
+    if (timeLineIdx === -1) return null;
+
+    const timeLine = lines[timeLineIdx];
+    const [startStr, endStr] = timeLine.split("-->").map((s) => s.trim());
+    const text = lines
+      .slice(timeLineIdx + 1)
+      .join("\n")
+      .replace(/<[^>]+>/g, "") // hapus HTML tags
+      .trim();
+
+    if (!text) return null;
+
+    return {
+      start: srtTimeToSeconds(startStr),
+      end: srtTimeToSeconds(endStr),
+      text,
+    };
+  }).filter(Boolean);
+};
+
+const srtTimeToSeconds = (timeStr) => {
+  if (!timeStr) return 0;
+  const clean = timeStr.replace(",", ".");
+  const parts = clean.split(":");
+  if (parts.length !== 3) return 0;
+  const [h, m, s] = parts;
+  return parseFloat(h) * 3600 + parseFloat(m) * 60 + parseFloat(s);
+};

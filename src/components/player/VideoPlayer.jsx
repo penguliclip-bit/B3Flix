@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { SERVERS } from '../../services/api';
+import SubtitleOverlay from './SubtitleOverlay';
 
 const VideoPlayer = ({ url, tmdbId, mediaType = "movie", season = null, episode = null, onServerChange }) => {
     const [activeServer, setActiveServer] = useState(SERVERS[0].id);
@@ -23,37 +24,30 @@ const VideoPlayer = ({ url, tmdbId, mediaType = "movie", season = null, episode 
     return (
         <div style={{ width: '100%' }}>
             {/* Server Selector */}
-            <div style={{
-                display: 'flex', gap: '8px', marginBottom: '10px',
-                flexWrap: 'wrap', alignItems: 'center'
-            }}>
-                <span style={{ color: '#aaa', fontSize: '0.8rem', marginRight: '4px' }}>Server:</span>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                <span style={{ color: '#888', fontSize: '0.78rem' }}>Server:</span>
                 {SERVERS.map(server => (
                     <button
                         key={server.id}
                         onClick={() => switchServer(server)}
                         style={{
-                            padding: '5px 12px',
-                            borderRadius: '20px',
-                            border: activeServer === server.id ? '2px solid var(--primary-color, #e50914)' : '1px solid #444',
+                            padding: '5px 12px', borderRadius: '20px',
+                            border: activeServer === server.id ? '2px solid var(--primary-color, #e50914)' : '1px solid #333',
                             backgroundColor: activeServer === server.id ? 'var(--primary-color, #e50914)' : '#1a1a1a',
-                            color: 'white',
-                            fontSize: '0.78rem',
-                            cursor: 'pointer',
+                            color: 'white', fontSize: '0.78rem', cursor: 'pointer',
                             fontWeight: activeServer === server.id ? '700' : '400',
-                            transition: 'all 0.2s',
-                            whiteSpace: 'nowrap',
+                            transition: 'all 0.2s', whiteSpace: 'nowrap',
                         }}
                     >
-                        {server.name} <span style={{ opacity: 0.8, fontSize: '0.7rem' }}>{server.label}</span>
+                        {server.name} <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>{server.label}</span>
                     </button>
                 ))}
-                <span style={{ color: '#666', fontSize: '0.72rem', marginLeft: 'auto' }}>
-                    💡 Jika ada iklan, coba server lain
+                <span style={{ color: '#555', fontSize: '0.7rem', marginLeft: 'auto' }}>
+                    💡 Banyak iklan? Ganti server
                 </span>
             </div>
 
-            {/* Player */}
+            {/* Video iframe */}
             <div style={{ position: 'relative', paddingTop: '56.25%', backgroundColor: '#000', borderRadius: '8px', overflow: 'hidden' }}>
                 {loading && (
                     <div style={{
@@ -66,7 +60,7 @@ const VideoPlayer = ({ url, tmdbId, mediaType = "movie", season = null, episode 
                             border: '4px solid #222', borderTop: '4px solid var(--primary-color, #e50914)',
                             borderRadius: '50%', animation: 'spin 0.8s linear infinite'
                         }} />
-                        <span style={{ color: '#aaa', fontSize: '0.85rem' }}>Memuat player...</span>
+                        <span style={{ color: '#888', fontSize: '0.82rem' }}>Memuat player...</span>
                         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
                     </div>
                 )}
@@ -75,9 +69,8 @@ const VideoPlayer = ({ url, tmdbId, mediaType = "movie", season = null, episode 
                     src={currentUrl || url}
                     style={{
                         position: 'absolute', top: 0, left: 0,
-                        width: '100%', height: '100%',
-                        border: 'none', opacity: loading ? 0 : 1,
-                        transition: 'opacity 0.3s'
+                        width: '100%', height: '100%', border: 'none',
+                        opacity: loading ? 0 : 1, transition: 'opacity 0.3s'
                     }}
                     allowFullScreen
                     allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
@@ -86,6 +79,16 @@ const VideoPlayer = ({ url, tmdbId, mediaType = "movie", season = null, episode 
                     title="Video Player"
                 />
             </div>
+
+            {/* Subtitle Overlay - di bawah player */}
+            {tmdbId && (
+                <SubtitleOverlay
+                    tmdbId={tmdbId}
+                    mediaType={mediaType}
+                    season={season}
+                    episode={episode}
+                />
+            )}
         </div>
     );
 };
