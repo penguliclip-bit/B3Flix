@@ -336,6 +336,7 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
   const [showSubPanel, setShowSubPanel]     = useState(false);
   const [showSettings, setShowSettings]     = useState(false);
   const [subEnabled, setSubEnabled]         = useState(true);
+  const [autoLoaded, setAutoLoaded]         = useState(false);
   const [fontSize, setFontSize]             = useState(22);
   const [subPos, setSubPos]                 = useState(88);
 
@@ -377,6 +378,7 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
     setAllSubs([]); setSelected(null); setCues([]); setCurrentCue(null);
     setDebugLogs([]); setSubError('');
     setListLoading(true);
+    setAutoLoaded(false);
 
     const logs = [`[${new Date().toLocaleTimeString()}] Mulai cari subtitle untuk TMDB: ${tmdbId} (${mediaType})`];
 
@@ -408,6 +410,38 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
       setDebugLogs(logs);
     }).finally(() => setListLoading(false));
   }, [tmdbId, mediaType, season, episode, retryKey]);
+
+  // ── Auto-load subtitle terbaik (Indo → English) ─────────────────────────
+  useEffect(() => {
+    if (listLoading || autoLoaded || allSubs.length === 0 || selected) return;
+
+    // Prioritas: Indonesia dulu, fallback ke English
+    const pick =
+      allSubs.find(s => isIndo(s.lang)) ||
+      allSubs.find(s => isEng(s.lang))  ||
+      allSubs[0];
+
+    if (!pick) return;
+    setAutoLoaded(true);
+
+    // Auto-load tanpa membuka panel
+    setSubLoading(true); setSubError(''); setCues([]); setCurrentCue(null);
+    const log = [`[Auto] Download: ${pick.source} - ${pick.name}`];
+    loadSubtitle(pick).then(parsed => {
+      setCues(parsed);
+      setSelected(pick);
+      setElapsed(0); setOffset(0);
+      resetTimer();
+      log.push(`✓ Auto-loaded ${parsed.length} baris (${pick.lang})`);
+    }).catch(e => {
+      console.warn('[AutoSub] gagal:', e.message);
+      log.push(`✗ Auto gagal: ${e.message}`);
+      setAutoLoaded(false); // izinkan retry manual
+    }).finally(() => {
+      setSubLoading(false);
+      setDebugLogs(p => [...p, ...log]);
+    });
+  }, [listLoading, allSubs, autoLoaded, selected]);
 
   // ── Load subtitle file ──────────────────────────────────────────────────
   const handleLoadSub = async (sub) => {
@@ -566,6 +600,12 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
               : <ChevronDown size={11}/>
             }
             {selected ? getLang(selected.lang) : 'Sub'}
+            {selected && autoLoaded && (
+              <span style={{
+                fontSize:'0.58rem', backgroundColor:'#16a34a',
+                color:'#fff', padding:'0 4px', borderRadius:'3px', marginLeft:'2px',
+              }}>Auto</span>
+            )}
           </button>
 
           {/* Settings */}
