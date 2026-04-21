@@ -42,6 +42,32 @@ const LANG = {
   fr:'🇫🇷 French', de:'🇩🇪 German',
 };
 const getLang  = c => LANG[c] || LANG[c?.toLowerCase()] || c?.toUpperCase() || '?';
+
+const FLAG_MAP = {
+  id:'🇮🇩', ind:'🇮🇩', ID:'🇮🇩',
+  en:'🇺🇸', eng:'🇺🇸', EN:'🇺🇸',
+  ja:'🇯🇵', jpn:'🇯🇵',
+  ko:'🇰🇷', kor:'🇰🇷',
+  zh:'🇨🇳', zho:'🇨🇳',
+  ar:'🇸🇦', ara:'🇸🇦',
+  es:'🇪🇸', spa:'🇪🇸',
+  pt:'🇧🇷', por:'🇧🇷',
+  fr:'🇫🇷', de:'🇩🇪',
+};
+const NAME_MAP = {
+  id:'Indonesian', ind:'Indonesian', ID:'Indonesian',
+  en:'English',    eng:'English',    EN:'English',
+  ja:'Japanese',   jpn:'Japanese',
+  ko:'Korean',     kor:'Korean',
+  zh:'Chinese',    zho:'Chinese',
+  ar:'Arabic',     ara:'Arabic',
+  es:'Spanish',    spa:'Spanish',
+  pt:'Portuguese', por:'Portuguese',
+  fr:'French',     de:'German',
+};
+const getLangFlag = c => FLAG_MAP[c] || FLAG_MAP[c?.toLowerCase()] || '🌐';
+const getLangName = c => NAME_MAP[c] || NAME_MAP[c?.toLowerCase()] || c?.toUpperCase() || '?';
+
 const isIndo   = c => ['id','ind','ID'].includes(c);
 const isEng    = c => ['en','eng','EN'].includes(c);
 
@@ -187,37 +213,68 @@ const getImdbId = async (tmdbId, type) => {
   } catch { return null; }
 };
 
-// ── ZIP extractor ────────────────────────────────────────────────────────
+// ── ZIP extractor (stored + DEFLATE) ────────────────────────────────────
 const extractSrtFromZip = async (zipUrl) => {
-  const text = await fetchWithProxy(zipUrl);
-  // Coba parse sebagai teks biasa dulu (kadang proxy auto-extract)
-  if (text && text.includes('-->')) return text;
+  // Binary ZIP parse via ArrayBuffer
+  const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(zipUrl)}`;
+  const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error(`ZIP fetch HTTP ${res.status}`);
 
-  // Manual ZIP parse dari binary via ArrayBuffer
-  try {
-    const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(zipUrl)}`, {
-      signal: AbortSignal.timeout(12000)
-    });
-    const buf = await res.arrayBuffer();
-    const b = new Uint8Array(buf);
-    let i = 0;
-    while (i < b.length - 30) {
-      if (b[i]===0x50&&b[i+1]===0x4B&&b[i+2]===0x03&&b[i+3]===0x04) {
-        const comp = b[i+8]|(b[i+9]<<8);
-        const csz  = b[i+18]|(b[i+19]<<8)|(b[i+20]<<16)|(b[i+21]<<24);
-        const fnl  = b[i+26]|(b[i+27]<<8);
-        const exl  = b[i+28]|(b[i+29]<<8);
-        const fn   = new TextDecoder().decode(b.slice(i+30,i+30+fnl)).toLowerCase();
-        const ds=i+30+fnl+exl, de=ds+csz;
-        if (fn.endsWith('.srt')&&comp===0&&de<=b.length) {
-          const t = new TextDecoder('utf-8',{fatal:false}).decode(b.slice(ds,de));
-          if (t.includes('-->')) return t;
+  const buf = await res.arrayBuffer();
+  const b = new Uint8Array(buf);
+
+  const decodeName = (bytes) => {
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch (_) { return new TextDecoder('latin1').decode(bytes); }
+  };
+
+  let i = 0;
+  while (i < b.length - 30) {
+    if (b[i]===0x50&&b[i+1]===0x4B&&b[i+2]===0x03&&b[i+3]===0x04) {
+      const comp = b[i+8]  | (b[i+9]  << 8);
+      const csz  = b[i+18] | (b[i+19] << 8) | (b[i+20] << 16) | (b[i+21] << 24);
+      const fnl  = b[i+26] | (b[i+27] << 8);
+      const exl  = b[i+28] | (b[i+29] << 8);
+      const fn   = decodeName(b.slice(i+30, i+30+fnl)).toLowerCase();
+      const ds   = i + 30 + fnl + exl;
+      const de   = ds + csz;
+
+      if (fn.endsWith('.srt') && de <= b.length) {
+        let text = '';
+        if (comp === 0) {
+          // Stored (no compression)
+          text = new TextDecoder('utf-8', { fatal: false }).decode(b.slice(ds, de));
+        } else if (comp === 8) {
+          // DEFLATE — gunakan DecompressionStream API
+          try {
+            const compressed = b.slice(ds, de);
+            const ds2 = new DecompressionStream('deflate-raw');
+            const writer = ds2.writable.getWriter();
+            writer.write(compressed);
+            writer.close();
+            const chunks = [];
+            const reader = ds2.readable.getReader();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+            }
+            const total = chunks.reduce((acc, c) => acc + c.length, 0);
+            const out = new Uint8Array(total);
+            let off = 0;
+            for (const c of chunks) { out.set(c, off); off += c.length; }
+            text = new TextDecoder('utf-8', { fatal: false }).decode(out);
+          } catch (_) {
+            i = (de > ds && de <= b.length) ? de : i + 1;
+            continue;
+          }
         }
-        i=(de>ds&&de<=b.length)?de:i+1;
-      } else i++;
-    }
-  } catch (e) { throw new Error(`ZIP: ${e.message}`); }
-  throw new Error('Tidak ada SRT dalam ZIP');
+        if (text && text.includes('-->')) return text;
+      }
+      i = (de > ds && de <= b.length) ? de : i + 1;
+    } else { i++; }
+  }
+  throw new Error('Tidak ada SRT valid dalam ZIP');
 };
 
 // ── Download + parse subtitle ─────────────────────────────────────────────
@@ -336,6 +393,7 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
   const [showSubPanel, setShowSubPanel]     = useState(false);
   const [showSettings, setShowSettings]     = useState(false);
   const [subEnabled, setSubEnabled]         = useState(true);
+  const [autoLoaded, setAutoLoaded]         = useState(false);
   const [fontSize, setFontSize]             = useState(22);
   const [subPos, setSubPos]                 = useState(88);
 
@@ -377,6 +435,8 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
     setAllSubs([]); setSelected(null); setCues([]); setCurrentCue(null);
     setDebugLogs([]); setSubError('');
     setListLoading(true);
+    setAutoLoaded(false);
+    setSelectedLang(null);
 
     const logs = [`[${new Date().toLocaleTimeString()}] Mulai cari subtitle untuk TMDB: ${tmdbId} (${mediaType})`];
 
@@ -408,6 +468,44 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
       setDebugLogs(logs);
     }).finally(() => setListLoading(false));
   }, [tmdbId, mediaType, season, episode, retryKey]);
+
+  // ── Auto-load subtitle terbaik (Indo → English), dengan fallback ────────
+  useEffect(() => {
+    if (listLoading || autoLoaded || allSubs.length === 0 || selected) return;
+
+    setAutoLoaded(true); // Set DULU sebelum async — cegah infinite loop
+
+    // Buat urutan kandidat: semua Indo (by downloads), lalu semua English
+    const indoSubs = allSubs.filter(s => isIndo(s.lang));
+    const engSubs  = allSubs.filter(s => isEng(s.lang));
+    const candidates = [...indoSubs, ...engSubs];
+    if (!candidates.length) return;
+
+    // Coba satu per satu sampai berhasil
+    const tryNext = async (list) => {
+      for (const pick of list) {
+        try {
+          setSubLoading(true); setSubError('');
+          setDebugLogs(p => [...p, `[Auto] Mencoba: ${pick.source} - ${pick.name}`]);
+          const parsed = await loadSubtitle(pick);
+          setCues(parsed);
+          setSelected(pick);
+          setElapsed(0); setOffset(0);
+          resetTimer();
+          setDebugLogs(p => [...p, `✓ Auto-loaded ${parsed.length} baris (${pick.lang})`]);
+          return; // sukses, stop
+        } catch (e) {
+          setDebugLogs(p => [...p, `✗ Auto gagal (${pick.name.slice(0,30)}): ${e.message}`]);
+          // lanjut ke kandidat berikutnya
+        } finally {
+          setSubLoading(false);
+        }
+      }
+      setDebugLogs(p => [...p, 'Auto: semua kandidat gagal, silakan pilih manual']);
+    };
+
+    tryNext(candidates);
+  }, [listLoading, allSubs, autoLoaded, selected]);
 
   // ── Load subtitle file ──────────────────────────────────────────────────
   const handleLoadSub = async (sub) => {
@@ -466,6 +564,8 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
     setCurrentUrl(newUrl);
     if (onServerChange) onServerChange(server.id, newUrl);
   };
+
+  const [selectedLang, setSelectedLang]     = useState(null); // untuk view dua level
 
   const grouped = groupByLang(allSubs);
   const indoCount = allSubs.filter(s => isIndo(s.lang)).length;
@@ -554,7 +654,7 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
           </button>
 
           {/* Subtitle picker */}
-          <button onClick={()=>{setShowSubPanel(v=>!v);setShowSettings(false);}} style={{
+          <button onClick={()=>{setShowSubPanel(v=>{if(v){setSelectedLang(null);}return !v;});setShowSettings(false);}} style={{
             display:'flex', alignItems:'center', gap:'4px',
             padding:'4px 9px', borderRadius:'5px',
             background:'rgba(0,0,0,0.75)', color:'#fff',
@@ -566,6 +666,12 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
               : <ChevronDown size={11}/>
             }
             {selected ? getLang(selected.lang) : 'Sub'}
+            {selected && autoLoaded && (
+              <span style={{
+                fontSize:'0.58rem', backgroundColor:'#16a34a',
+                color:'#fff', padding:'0 4px', borderRadius:'3px', marginLeft:'2px',
+              }}>Auto</span>
+            )}
           </button>
 
           {/* Settings */}
@@ -592,169 +698,158 @@ const VideoPlayer = ({ url, tmdbId, mediaType='movie', season=null, episode=null
           </button>
         </div>
 
-        {/* SUBTITLE PANEL */}
-        {showSubPanel && (
-          <div style={{
+        {/* SUBTITLE PANEL - Cineby style */}
+        {showSubPanel && (() => {
+          const panelStyle = {
             position:'absolute', bottom:'46px', right:'8px', zIndex:10,
-            width:'clamp(270px,36vw,410px)',
-            background:'rgba(8,8,8,0.97)', backdropFilter:'blur(20px)',
-            border:'1px solid rgba(255,255,255,0.1)', borderRadius:'12px',
-            padding:'16px', maxHeight:'420px', overflowY:'auto',
-            boxShadow:'0 8px 32px rgba(0,0,0,0.8)',
-          }}>
-            {/* Header */}
-            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'14px' }}>
-              <h3 style={{ margin:0, fontSize:'0.88rem', color:'#fff', fontWeight:600 }}>
-                Pilih Subtitle
-                {allSubs.length > 0 && (
-                  <span style={{ color:'#444', fontWeight:400, fontSize:'0.73rem', marginLeft:'6px' }}>
-                    ({allSubs.length})
-                  </span>
-                )}
-              </h3>
-              <div style={{ display:'flex', gap:'5px' }}>
+            width:'clamp(260px,34vw,380px)',
+            background:'rgba(10,10,10,0.98)', backdropFilter:'blur(24px)',
+            border:'1px solid rgba(255,255,255,0.09)', borderRadius:'14px',
+            overflow:'hidden', boxShadow:'0 12px 40px rgba(0,0,0,0.9)',
+          };
+          const rowBase = {
+            display:'flex', alignItems:'center', justifyContent:'space-between',
+            width:'100%', padding:'11px 16px', border:'none', textAlign:'left',
+            cursor:'pointer', fontSize:'0.83rem',
+            borderBottom:'1px solid rgba(255,255,255,0.04)', transition:'background 0.15s',
+          };
+          const rowStyle = (active) => ({...rowBase,
+            background: active ? 'rgba(255,255,255,0.07)' : 'transparent',
+            color: active ? '#fff' : '#aaa',
+          });
+          const hdrStyle = {
+            display:'flex', alignItems:'center', gap:'8px',
+            padding:'12px 16px', borderBottom:'1px solid rgba(255,255,255,0.07)',
+          };
+
+          if (!selectedLang) return (
+            <div style={panelStyle}>
+              <div style={hdrStyle}>
+                <button onClick={()=>{setShowSubPanel(false);setSelectedLang(null);}}
+                  style={{background:'none',border:'none',color:'#555',cursor:'pointer',padding:0,display:'flex'}}>
+                  <X size={16}/>
+                </button>
+                <span style={{color:'#fff',fontWeight:600,fontSize:'0.85rem',flex:1}}>Subtitles</span>
                 <button onClick={()=>setRetryKey(k=>k+1)} title="Refresh"
-                  style={{ background:'none', border:'none', color:'#555', cursor:'pointer', padding:'2px' }}>
+                  style={{background:'none',border:'none',color:'#555',cursor:'pointer',padding:0,display:'flex'}}>
                   <RefreshCw size={13}/>
                 </button>
-                <button onClick={()=>setShowSubPanel(false)}
-                  style={{ background:'none', border:'none', color:'#555', cursor:'pointer', padding:'2px' }}>
-                  <X size={15}/>
+              </div>
+              <div style={{maxHeight:'380px', overflowY:'auto'}}>
+                {listLoading && (
+                  <div style={{textAlign:'center',padding:'32px',color:'#555'}}>
+                    <Loader size={20} style={{animation:'b3spin 1s linear infinite'}}/>
+                    <div style={{marginTop:'8px',fontSize:'0.75rem'}}>Mencari subtitle...</div>
+                  </div>
+                )}
+                <input ref={fileRef} type="file" accept=".srt,.sub,.vtt" style={{display:'none'}} onChange={handleFileUpload}/>
+                <button onClick={()=>fileRef.current?.click()} style={rowStyle(false)}
+                  onMouseEnter={e=>e.currentTarget.style.background='rgba(255,255,255,0.05)'}
+                  onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                  <span style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                    <Upload size={13} style={{color:'#555'}}/> Upload file .srt
+                  </span>
                 </button>
-              </div>
-            </div>
-
-            {/* Error */}
-            {subError && (
-              <div style={{
-                background:'#1a0808', border:'1px solid #3a1a1a', borderRadius:'7px',
-                padding:'8px 12px', marginBottom:'12px',
-                fontSize:'0.74rem', color:'#f87171',
-                display:'flex', gap:'7px', alignItems:'flex-start',
-              }}>
-                <AlertCircle size={13} style={{flexShrink:0,marginTop:'1px'}}/> {subError}
-              </div>
-            )}
-
-            {/* Upload */}
-            <input ref={fileRef} type="file" accept=".srt,.sub,.vtt" style={{display:'none'}} onChange={handleFileUpload}/>
-            <button onClick={()=>fileRef.current?.click()} style={{
-              width:'100%', padding:'9px 12px', marginBottom:'8px',
-              background:'#111', border:'1px dashed #2a2a2a',
-              borderRadius:'8px', color:'#777', cursor:'pointer',
-              fontSize:'0.77rem', display:'flex', alignItems:'center', gap:'8px',
-            }}
-              onMouseEnter={e=>e.currentTarget.style.borderColor='#444'}
-              onMouseLeave={e=>e.currentTarget.style.borderColor='#2a2a2a'}
-            >
-              <Upload size={13}/> Upload .srt dari komputer
-            </button>
-
-            {/* Off */}
-            <button onClick={()=>{setCues([]);setSelected(null);setCurrentCue(null);setShowSubPanel(false);}} style={{
-              width:'100%', padding:'9px 12px', marginBottom:'12px',
-              background:!selected?'#0c1a3a':'#111',
-              border:`1px solid ${!selected?'#1e40af':'#1f1f1f'}`,
-              borderRadius:'8px', color:!selected?'#93c5fd':'#666',
-              cursor:'pointer', fontSize:'0.77rem',
-              display:'flex', alignItems:'center', gap:'8px',
-            }}>
-              <X size={12}/> Off — No Subtitles
-            </button>
-
-            {/* Loading */}
-            {listLoading && (
-              <div style={{ textAlign:'center', padding:'28px', color:'#555' }}>
-                <Loader size={22} style={{animation:'b3spin 1s linear infinite',color:'#555'}}/>
-                <div style={{marginTop:'8px', fontSize:'0.78rem'}}>Mencari dari 3 sumber...</div>
-              </div>
-            )}
-
-            {/* Empty */}
-            {!listLoading && allSubs.length===0 && (
-              <div style={{ textAlign:'center', padding:'20px' }}>
-                <AlertCircle size={32} style={{color:'#333',marginBottom:'10px'}}/>
-                <div style={{color:'#666',fontSize:'0.82rem',marginBottom:'6px'}}>
-                  Subtitle tidak ditemukan
-                </div>
-                <div style={{color:'#444',fontSize:'0.72rem',lineHeight:1.6}}>
-                  Coba klik 🐛 untuk lihat detail error,<br/>
-                  atau upload file .srt manual.
-                </div>
-              </div>
-            )}
-
-            {/* Indo badge */}
-            {!listLoading && indoCount > 0 && (
-              <div style={{
-                background:'#061406', border:'1px solid #1a3a1a',
-                borderRadius:'6px', padding:'6px 10px', marginBottom:'12px',
-                fontSize:'0.71rem', color:'#4ade80',
-                display:'flex', alignItems:'center', gap:'6px',
-              }}>
-                <Check size={12}/> {indoCount} subtitle Indonesia tersedia
-              </div>
-            )}
-
-            {/* Subtitle list */}
-            {!listLoading && grouped.map(([lang, subs]) => (
-              <div key={lang} style={{marginBottom:'14px'}}>
-                <div style={{
-                  fontSize:'0.67rem', color:'#444', marginBottom:'6px',
-                  textTransform:'uppercase', letterSpacing:'1px',
-                  display:'flex', alignItems:'center', gap:'6px',
-                }}>
-                  {getLang(lang)}
-                  <span style={{color:'#333'}}>({subs.length})</span>
-                  {isIndo(lang) && (
-                    <span style={{
-                      background:'#061406', color:'#4ade80', fontSize:'0.59rem',
-                      padding:'0 5px', borderRadius:'3px', border:'1px solid #1a3a1a',
-                    }}>✓ Rekomendasi</span>
-                  )}
-                </div>
-                {subs.slice(0,8).map((sub,i) => {
-                  const isSel = selected?.id===sub.id;
-                  const isLd  = subLoading && isSel;
+                <button onClick={()=>{setCues([]);setSelected(null);setCurrentCue(null);setAutoLoaded(false);setShowSubPanel(false);}}
+                  style={rowStyle(!selected)}
+                  onMouseEnter={e=>{ if(selected) e.currentTarget.style.background='rgba(255,255,255,0.05)'; }}
+                  onMouseLeave={e=>{ if(selected) e.currentTarget.style.background=!selected?'rgba(255,255,255,0.07)':'transparent'; }}>
+                  <span style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                    <X size={13} style={{color:'#555'}}/> Off — No Subtitles
+                  </span>
+                  {!selected && <Check size={14} style={{color:'#4ade80'}}/>}
+                </button>
+                {!listLoading && allSubs.length===0 && (
+                  <div style={{textAlign:'center',padding:'24px',color:'#555',fontSize:'0.78rem'}}>
+                    Subtitle tidak ditemukan
+                  </div>
+                )}
+                {!listLoading && grouped.map(([lang, subs]) => {
+                  const isActiveLang = selected && (selected.lang===lang||
+                    (isIndo(lang)&&isIndo(selected.lang))||(isEng(lang)&&isEng(selected.lang)));
                   return (
-                    <button key={sub.id||i} onClick={()=>handleLoadSub(sub)}
-                      disabled={subLoading} style={{
-                        display:'flex', alignItems:'center', gap:'9px',
-                        width:'100%', padding:'8px 10px', marginBottom:'3px',
-                        background:isSel?'#0c1a3a':'#111',
-                        border:`1px solid ${isSel?'#1e40af':'#1a1a1a'}`,
-                        borderRadius:'7px', color:'#fff',
-                        cursor:subLoading?'wait':'pointer', textAlign:'left',
-                        transition:'all 0.15s',
-                      }}
-                      onMouseEnter={e=>{if(!isSel)e.currentTarget.style.borderColor='#2a2a2a'}}
-                      onMouseLeave={e=>{if(!isSel)e.currentTarget.style.borderColor='#1a1a1a'}}
-                    >
-                      <div style={{width:'14px',flexShrink:0}}>
-                        {isSel&&!isLd&&<Check size={12} style={{color:'#4ade80'}}/>}
-                        {isLd&&<Loader size={12} style={{animation:'b3spin 1s linear infinite'}}/>}
-                      </div>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{
-                          fontSize:'0.77rem', overflow:'hidden',
-                          textOverflow:'ellipsis', whiteSpace:'nowrap',
-                          color:isSel?'#93c5fd':'#ccc',
-                        }}>{sub.name}</div>
-                        <div style={{fontSize:'0.63rem',color:'#444',marginTop:'1px',display:'flex',gap:'6px'}}>
-                          <span style={{color:sub.source==='os'?'#6366f1':sub.source==='os-legacy'?'#818cf8':'#555'}}>
-                            {sub.source==='os'?'OpenSubtitles':sub.source==='os-legacy'?'OS Legacy':'SUBDL'}
-                          </span>
-                          {sub.downloads>0&&<span>↓ {sub.downloads.toLocaleString()}</span>}
-                          {sub.hi&&<span>♿</span>}
-                        </div>
-                      </div>
+                    <button key={lang} onClick={()=>setSelectedLang(lang)}
+                      style={rowStyle(isActiveLang)}
+                      onMouseEnter={e=>{ if(!isActiveLang) e.currentTarget.style.background='rgba(255,255,255,0.05)'; }}
+                      onMouseLeave={e=>{ if(!isActiveLang) e.currentTarget.style.background='transparent'; }}>
+                      <span style={{display:'flex',alignItems:'center',gap:'10px'}}>
+                        <span style={{fontSize:'1.05rem'}}>{getLangFlag(lang)}</span>
+                        <span>
+                          {getLangName(lang)}
+                          {isIndo(lang) && (
+                            <span style={{marginLeft:'6px',fontSize:'0.6rem',color:'#4ade80',
+                              background:'rgba(74,222,128,0.1)',padding:'1px 5px',borderRadius:'3px'}}>Auto</span>
+                          )}
+                        </span>
+                      </span>
+                      <span style={{display:'flex',alignItems:'center',gap:'6px',color:'#444',fontSize:'0.72rem'}}>
+                        <span>{subs.length}</span>
+                        {isActiveLang
+                          ? <Check size={13} style={{color:'#4ade80'}}/>
+                          : <ChevronDown size={13} style={{transform:'rotate(-90deg)'}}/>}
+                      </span>
                     </button>
                   );
                 })}
               </div>
-            ))}
-          </div>
-        )}
+            </div>
+          );
+
+          const langSubs = grouped.find(([l])=>l===selectedLang)?.[1]||[];
+          return (
+            <div style={panelStyle}>
+              <div style={hdrStyle}>
+                <button onClick={()=>setSelectedLang(null)}
+                  style={{background:'none',border:'none',color:'#aaa',cursor:'pointer',padding:0,
+                    display:'flex',alignItems:'center',gap:'4px',fontSize:'0.78rem'}}>
+                  <ChevronDown size={15} style={{transform:'rotate(90deg)'}}/> Kembali
+                </button>
+                <span style={{color:'#fff',fontWeight:600,fontSize:'0.85rem',flex:1,textAlign:'center'}}>
+                  {getLangName(selectedLang)}
+                </span>
+                <button onClick={()=>{setShowSubPanel(false);setSelectedLang(null);}}
+                  style={{background:'none',border:'none',color:'#555',cursor:'pointer',padding:0,display:'flex'}}>
+                  <X size={16}/>
+                </button>
+              </div>
+              {subError && (
+                <div style={{margin:'8px',background:'#1a0808',border:'1px solid #3a1a1a',
+                  borderRadius:'7px',padding:'8px 12px',fontSize:'0.73rem',color:'#f87171',
+                  display:'flex',gap:'6px',alignItems:'flex-start'}}>
+                  <AlertCircle size={12} style={{flexShrink:0,marginTop:'1px'}}/> {subError}
+                </div>
+              )}
+              <div style={{maxHeight:'380px', overflowY:'auto'}}>
+                {langSubs.map((sub,i)=>{
+                  const isSel=selected?.id===sub.id;
+                  const isLd=subLoading&&isSel;
+                  return (
+                    <button key={sub.id||i} onClick={()=>handleLoadSub(sub)}
+                      disabled={subLoading} style={rowStyle(isSel)}
+                      onMouseEnter={e=>{ if(!isSel) e.currentTarget.style.background='rgba(255,255,255,0.05)'; }}
+                      onMouseLeave={e=>{ if(!isSel) e.currentTarget.style.background='transparent'; }}>
+                      <span style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:'0.78rem',overflow:'hidden',textOverflow:'ellipsis',
+                          whiteSpace:'nowrap',color:isSel?'#fff':'#ccc'}}>{sub.name}</div>
+                        <div style={{fontSize:'0.62rem',color:'#555',marginTop:'2px',display:'flex',gap:'8px'}}>
+                          <span style={{color:sub.source==='os-legacy'?'#818cf8':'#555'}}>
+                            {sub.source==='os'?'OpenSubtitles':sub.source==='os-legacy'?'OS Legacy':'SUBDL'}
+                          </span>
+                          {sub.downloads>0&&<span>↓ {sub.downloads.toLocaleString()}</span>}
+                          {sub.hi&&<span>♿ HI</span>}
+                        </div>
+                      </span>
+                      <span style={{width:'18px',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'flex-end'}}>
+                        {isLd&&<Loader size={13} style={{animation:'b3spin 1s linear infinite',color:'#888'}}/>}
+                        {isSel&&!isLd&&<Check size={14} style={{color:'#4ade80'}}/>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* SETTINGS PANEL */}
         {showSettings && (
